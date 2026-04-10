@@ -453,6 +453,50 @@ def test_refresh_all_does_not_touch_runs_or_write_markdown(tmp_path):
     assert list(out_dir.glob("*.md")) == []
 
 
+def test_refresh_all_retranscribes_every_entry_when_all_present(tmp_path):
+    """Plan §Test Plan: `--all` mode selects everything.
+
+    Complements the overwrite-in-place test (which exercises one-present,
+    one-missing) by verifying that when all referenced audio files exist
+    on disk, every state entry gets retranscribed.
+    """
+    memo_dir, state_path, _ = _make_env(tmp_path)
+    names = [
+        "memo_2026-04-09 17.45.00_47.7_-122.3.m4a",
+        "memo_2026-04-09 17.46.00_47.7_-122.3.m4a",
+        "memo_2026-04-09 17.47.00_47.7_-122.3.m4a",
+    ]
+    for name in names:
+        (memo_dir / name).write_bytes(b"x")
+
+    state = load_state(state_path)
+    for name in names:
+        state["files"][name] = {
+            "transcription": "old",
+            "transcribed_at": "2026-04-09T17:30:00Z",
+        }
+    write_state_atomic(state_path, state)
+
+    calls: list[str] = []
+
+    def fake_transcriber(p):
+        calls.append(p.name)
+        return f"new {p.name}"
+
+    n = refresh_all_transcriptions(
+        memo_dir,
+        state_path,
+        transcriber=fake_transcriber,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+    assert n == len(names)
+    assert sorted(calls) == sorted(names)
+    state = load_state(state_path)
+    for name in names:
+        assert state["files"][name]["transcription"] == f"new {name}"
+
+
 # ---------- list_runs ----------
 
 
@@ -479,6 +523,20 @@ def test_list_runs_sorted_oldest_first(tmp_path):
 def test_list_runs_empty_state(tmp_path):
     _, state_path, _ = _make_env(tmp_path)
     assert list_runs(state_path) == []
+
+
+def test_list_runs_malformed_entry_raises_runtime_error(tmp_path):
+    """A hand-edited run entry missing `created_at` must surface as a
+    `RuntimeError` (so `main()` maps it to exit 2), not an uncaught
+    `KeyError` that crashes with a raw traceback.
+    """
+    _, state_path, _ = _make_env(tmp_path)
+    state = load_state(state_path)
+    state["runs"]["bad-entry"] = {"files": ["a.m4a"]}  # missing created_at
+    write_state_atomic(state_path, state)
+
+    with pytest.raises(RuntimeError, match="malformed run entry"):
+        list_runs(state_path)
 
 
 # ---------- regenerate_run ----------

@@ -45,7 +45,7 @@ Files may appear in the directory as iCloud stubs (not yet downloaded). macOS tr
   - `SLEEP_BETWEEN_REQUESTS_SEC = 3.5` (derived: 60/20 + headroom)
   - Rule: only sleep when total files to process exceeds `MAX_REQUESTS_PER_MINUTE`. For smaller runs, fire as fast as possible.
   - Back-to-back runs totaling >20 in 60 seconds is ignored in v1 — not a realistic scenario. The 7,200 audio-seconds/hour limit is also ignored — walking memos are well under.
-- **Retry backoff:** Exponential starting at 1s (1s → 2s → 4s), max 3 attempts.
+- **Retry backoff:** Exponential, max 3 attempts total. Sleep 1s between attempts 1 and 2, 2s between attempts 2 and 3. The doubling schedule (base × 2^attempt) would continue to 4s, 8s, etc. if more attempts were ever configured.
 
 ## Output
 
@@ -209,6 +209,9 @@ Each flag is mutually exclusive with the others. Default (no flags) is the commo
 - **M7 follow-up — committed real audio fixtures (~400 KB).** Two short real memos copied from iCloud into `tests/fixtures/smoke/`. Substring assertions key off stable words in Whisper's output (`"working"`, `"exciting"`) rather than exact transcriptions, so ±1% Whisper variance doesn't break the test. Fixtures are committed because a fresh-clone reproducibility beats coupling the smoke to the user's live iCloud dir (which would drift as new memos are recorded).
 - **M7 follow-up — `httpx[socks]` added as a runtime dep.** Claude Code's network sandbox enforces its `allowedDomains` list by running a local SOCKS5 proxy on `localhost:58218` and injecting `ALL_PROXY=socks5h://...` into every subprocess. httpx (used by the Groq SDK) auto-reads that env var and needs `socksio` to speak SOCKS5. Adding `httpx[socks]>=0.27` to `pyproject.toml` pulls in socksio (~1000 lines of pure Python, sans-IO design) so the smoke test runs end-to-end inside the sandbox. A manual run from a normal terminal (which doesn't inherit the sandbox proxy env) still works without the extra, but all sandboxed runs require it.
 - **M7 follow-up — tests reorganized into `unit/` and `e2e/` subdirectories.** Layout: `tests/unit/test_transcribe.py` for pytest unit tests and `tests/e2e/smoke.py` with its fixtures at `tests/e2e/fixtures/smoke/`. `testpaths = ["tests"]` in `pyproject.toml` still recursively finds the unit tests unchanged. `smoke.py` uses `HERE = Path(__file__).resolve().parent` and `FIXTURE_DIR = HERE / "fixtures" / "smoke"` so the path is colocation-relative and robust to future moves. The split is forward-looking: v1 has one e2e test, but as the CLI grows (Agent post-processing in v2, additional modes), non-smoke e2e scenarios will land under `tests/e2e/` alongside `smoke.py` without further restructuring.
+- **Post-review — `list_runs` guards against malformed run entries.** A code review caught that `list_runs` accessed `data["created_at"]` and `data["files"]` directly, so a hand-edited state file missing either key would raise a raw `KeyError` escaping `main()`'s `RuntimeError` handler. Now wraps each entry access in a try/except and re-raises as `RuntimeError("malformed run entry ...")`, which `main()` already maps to exit code 2. `load_state`'s `setdefault` only normalizes top-level keys (`version`, `files`, `runs`); per-run entry shape is enforced at the reader, not the loader.
+- **Post-review — added missing `--all selects everything` test.** The existing `test_refresh_all_overwrites_in_place_and_preserves_missing` exercises the one-present/one-missing path but never exercised "all referenced files present → every entry retranscribed". New `test_refresh_all_retranscribes_every_entry_when_all_present` closes the plan gap.
+- **Post-review — plan doc drift fixed.** §Test Plan's `--list-runs` bullet still mentioned `created_at` in the output (M7 dropped it) and §Transcription's retry backoff text said `1s → 2s → 4s` when max 3 attempts only fires two sleeps (1s, 2s). Both updated to match the code.
 
 ## Test Plan
 
@@ -251,7 +254,7 @@ Pure logic only — no network, no filesystem state beyond `tmp_path`.
   - `--regenerate` with an unknown run ID exits non-zero with an error.
   - `--regenerate` where a referenced filename is missing from `files` skips it with a warning.
 - **List runs**
-  - `--list-runs` prints one line per run, sorted chronologically, with run ID, created_at, and file count.
+  - `--list-runs` prints one line per run, sorted chronologically, with run ID and file count (`<run_id>  <n> memos`).
 - **Markdown rendering**
   - Correct heading format (`## Memo N — HH:MM — LAT, LONG`)
   - Non-matching filename renders with fallback heading (`## Memo N — <filename>`)

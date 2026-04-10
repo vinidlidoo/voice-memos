@@ -335,11 +335,24 @@ def list_runs(state_path: Path) -> list[tuple[str, int]]:
     """Return past runs as (run_id, file_count), oldest first.
 
     Sorted by `created_at` (not by `run_id`) so entries remain in true
-    chronological order even if the run_id format ever changes.
+    chronological order even if the run_id format ever changes. Raises
+    `RuntimeError` if any run entry is missing `created_at` or `files`
+    (which `main()` maps to exit code 2) — prevents a raw `KeyError`
+    from escaping on a hand-edited or otherwise malformed state file.
     """
     state = load_state(state_path)
-    items = sorted(state["runs"].items(), key=lambda kv: kv[1]["created_at"])
-    return [(run_id, len(data["files"])) for run_id, data in items]
+    entries: list[tuple[str, str, int]] = []
+    for run_id, data in state["runs"].items():
+        try:
+            created_at = data["created_at"]
+            file_count = len(data["files"])
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"malformed run entry {run_id!r} in state.json: {exc}"
+            ) from exc
+        entries.append((run_id, created_at, file_count))
+    entries.sort(key=lambda e: e[1])
+    return [(run_id, file_count) for run_id, _, file_count in entries]
 
 
 def regenerate_run(
