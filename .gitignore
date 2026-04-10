@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local state (never commit — contains transcriptions)
+src/state.json
+src/state.json.corrupt-*
+
+# Generated output
+*.md
+!plans/*.md
+!CLAUDE.md
+!README.md
