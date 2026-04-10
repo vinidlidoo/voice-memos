@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger("voice_memos")
 
 # Rate limiting — tuned to Groq free tier. See plan §Transcription.
 MAX_REQUESTS_PER_MINUTE = 20
@@ -166,3 +169,108 @@ def transcribe_file(path: Path, *, client=None) -> str:
             model=GROQ_MODEL,
         )
     return resp.text
+
+
+def discover_audio_files(memo_dir: Path) -> list[Path]:
+    """Return .m4a files in memo_dir. Warns about .qta files (skipped)."""
+    m4a_files = sorted(memo_dir.glob("*.m4a"))
+    qta_files = list(memo_dir.glob("*.qta"))
+    if qta_files:
+        logger.warning(
+            "Skipping %d .qta file(s) — convert with: ffmpeg -i input.qta output.m4a",
+            len(qta_files),
+        )
+    return m4a_files
+
+
+def _file_sort_key(path: Path) -> tuple:
+    meta = parse_filename(path.name)
+    if meta is not None:
+        return (0, meta.timestamp)
+    return (1, path.name)
+
+
+def _format_run_id(dt_local: datetime) -> str:
+    return dt_local.strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def _format_iso_utc(dt: datetime) -> str:
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _default_clock() -> datetime:
+    return datetime.now().astimezone()
+
+
+def process_new_memos(
+    memo_dir: Path,
+    state_path: Path,
+    output_dir: Path,
+    *,
+    transcriber: Callable[[Path], str] = transcribe_file,
+    clock: Callable[[], datetime] = _default_clock,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Path | None:
+    """Discover new memos, transcribe, persist state, and write a markdown file.
+
+    Returns the absolute path of the written markdown file, or None if nothing
+    was written (no new memos, or all transcriptions failed).
+    """
+    state = load_state(state_path)
+    all_files = discover_audio_files(memo_dir)
+    new_files = sorted(
+        (f for f in all_files if f.name not in state["files"]),
+        key=_file_sort_key,
+    )
+
+    if not new_files:
+        logger.info("No new memos to process.")
+        return None
+
+    rate_limited = should_sleep(len(new_files))
+    memos: list[Memo] = []
+
+    for i, audio_path in enumerate(new_files):
+        logger.info("Transcribing %s", audio_path.name)
+        try:
+            text = retry_with_backoff(
+                lambda p=audio_path: transcriber(p),
+                sleep=sleep,
+            )
+        except Exception as exc:
+            logger.error("Skipping %s: %s", audio_path.name, exc)
+            continue
+
+        state["files"][audio_path.name] = {
+            "transcription": text,
+            "transcribed_at": _format_iso_utc(clock()),
+        }
+        write_state_atomic(state_path, state)
+
+        memos.append(
+            Memo(
+                filename=audio_path.name,
+                transcription=text,
+                meta=parse_filename(audio_path.name),
+            )
+        )
+
+        if rate_limited and i < len(new_files) - 1:
+            sleep(SLEEP_BETWEEN_REQUESTS_SEC)
+
+    if not memos:
+        logger.warning("All new memos failed to transcribe; no output written.")
+        return None
+
+    run_local = clock()
+    run_id = _format_run_id(run_local)
+    output_path = (output_dir / f"{run_id}.md").resolve()
+    output_path.write_text(render_markdown(memos))
+
+    state["runs"][run_id] = {
+        "created_at": _format_iso_utc(run_local),
+        "files": [m.filename for m in memos],
+    }
+    write_state_atomic(state_path, state)
+
+    return output_path

@@ -9,6 +9,7 @@ from transcribe import (
     Memo,
     load_state,
     parse_filename,
+    process_new_memos,
     render_markdown,
     retry_with_backoff,
     should_sleep,
@@ -224,3 +225,155 @@ def test_transcribe_file_calls_client_with_model(tmp_path):
     assert result == "hello world"
     assert captured["model"] == "whisper-large-v3-turbo"
     assert captured["file"] == ("memo.m4a", b"fake-audio-bytes")
+
+
+# ---------- process_new_memos (main loop) ----------
+
+
+def _make_env(tmp_path):
+    """Set up an isolated memo dir, state path, and output dir under tmp_path."""
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "state.json"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    return memo_dir, state_path, out_dir
+
+
+def _fixed_clock(year=2026, month=4, day=9, hour=17, minute=50):
+    fixed = datetime(year, month, day, hour, minute, 0).astimezone()
+    return lambda: fixed
+
+
+def test_process_no_new_memos_returns_none(tmp_path):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+
+    def boom(_p):
+        raise AssertionError("transcriber should not be called")
+
+    result = process_new_memos(
+        memo_dir,
+        state_path,
+        out_dir,
+        transcriber=boom,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+    assert result is None
+    assert list(out_dir.glob("*.md")) == []
+    assert load_state(state_path)["runs"] == {}
+
+
+def test_process_writes_markdown_state_and_run_entry(tmp_path):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    f1 = "memo_2026-04-09 17.45.00_47.714644_-122.373724.m4a"
+    f2 = "memo_2026-04-09 17.46.00_47.714644_-122.373724.m4a"
+    (memo_dir / f1).write_bytes(b"a")
+    (memo_dir / f2).write_bytes(b"b")
+
+    def fake_transcriber(p):
+        return f"text for {p.name}"
+
+    result = process_new_memos(
+        memo_dir,
+        state_path,
+        out_dir,
+        transcriber=fake_transcriber,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+
+    assert result is not None
+    assert result.name == "2026-04-09_17-50-00.md"
+    md = result.read_text()
+    assert f"text for {f1}" in md
+    assert f"text for {f2}" in md
+
+    state = load_state(state_path)
+    assert set(state["files"].keys()) == {f1, f2}
+    assert state["files"][f1]["transcribed_at"].endswith("Z")
+
+    run_id = "2026-04-09_17-50-00"
+    assert run_id in state["runs"]
+    # Files list is in chronological order.
+    assert state["runs"][run_id]["files"] == [f1, f2]
+    assert state["runs"][run_id]["created_at"].endswith("Z")
+
+
+def test_process_skips_already_transcribed_files(tmp_path):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    f1 = "memo_2026-04-09 17.45.00_47.7_-122.3.m4a"
+    f2 = "memo_2026-04-09 17.46.00_47.7_-122.3.m4a"
+    (memo_dir / f1).write_bytes(b"a")
+    (memo_dir / f2).write_bytes(b"b")
+
+    state = load_state(state_path)
+    state["files"][f1] = {
+        "transcription": "old",
+        "transcribed_at": "2026-04-09T17:30:00Z",
+    }
+    write_state_atomic(state_path, state)
+
+    calls: list[str] = []
+
+    def fake_transcriber(p):
+        calls.append(p.name)
+        return "new"
+
+    process_new_memos(
+        memo_dir,
+        state_path,
+        out_dir,
+        transcriber=fake_transcriber,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+
+    assert calls == [f2]
+    state = load_state(state_path)
+    assert state["files"][f1]["transcription"] == "old"
+    assert state["files"][f2]["transcription"] == "new"
+    assert state["runs"]["2026-04-09_17-50-00"]["files"] == [f2]
+
+
+def test_process_ignores_qta_files(tmp_path):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    (memo_dir / "memo_2026-04-09 17.45.00_47.7_-122.3.m4a").write_bytes(b"a")
+    (memo_dir / "old_recording.qta").write_bytes(b"b")
+
+    calls: list[str] = []
+
+    def fake_transcriber(p):
+        calls.append(p.name)
+        return "text"
+
+    process_new_memos(
+        memo_dir,
+        state_path,
+        out_dir,
+        transcriber=fake_transcriber,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+    assert len(calls) == 1
+    assert calls[0].endswith(".m4a")
+
+
+def test_process_all_failures_writes_no_output(tmp_path):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    (memo_dir / "memo_2026-04-09 17.45.00_47.7_-122.3.m4a").write_bytes(b"a")
+
+    def always_fails(_p):
+        raise RuntimeError("network down")
+
+    result = process_new_memos(
+        memo_dir,
+        state_path,
+        out_dir,
+        transcriber=always_fails,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+    assert result is None
+    assert list(out_dir.glob("*.md")) == []
+    assert load_state(state_path)["runs"] == {}
