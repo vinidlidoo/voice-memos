@@ -3,7 +3,7 @@ name = "voice-memos"
 version = "0.1.0"
 description = "Transcribe iCloud voice memos into a markdown file."
 requires-python = ">=3.12"
-dependencies = ["groq>=0.11.0"]
+dependencies = ["groq>=0.11.0", "httpx[socks]>=0.27"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.6"]
