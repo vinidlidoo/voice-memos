@@ -3,15 +3,10 @@ name = "voice-memos"
 version = "0.1.0"
 description = "Transcribe iCloud voice memos into a markdown file."
 requires-python = ">=3.12"
-dependencies = [
-    "groq>=0.11.0",
-]
+dependencies = ["groq>=0.11.0"]
 
 [dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.6",
-]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -23,3 +18,6 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+ignore = ["**"]
