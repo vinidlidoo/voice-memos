@@ -1,14 +1,14 @@
 """End-to-end smoke test against the real Groq API.
 
 Runs the full transcribe.py default path against committed audio fixtures
-under `tests/fixtures/smoke/`, using a throwaway state.json and output dir
-under $TMPDIR. Gated on `GROQ_API_KEY`.
+under `tests/e2e/fixtures/smoke/`, using a throwaway state.json and output
+dir under $TMPDIR. Gated on `GROQ_API_KEY`.
 
 Exits 0 on success, 1 on any assertion failure. Not a pytest test (filename
 is `smoke.py`, not `test_*.py`) so `uv run pytest` does not pick it up.
 
 Usage:
-    uv run tests/smoke.py
+    uv run tests/e2e/smoke.py
 """
 
 from __future__ import annotations
@@ -18,12 +18,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from transcribe import load_state, main  # noqa: E402
 
-FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "smoke"
+FIXTURE_DIR = HERE / "fixtures" / "smoke"
 
 # The two committed fixture files were recorded at 17:47:13 and 17:47:41 on
 # 2026-04-09. Sorted alphabetically equals sorted chronologically here, which
