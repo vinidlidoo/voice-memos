@@ -331,15 +331,15 @@ def refresh_all_transcriptions(
     return refreshed
 
 
-def list_runs(state_path: Path) -> list[tuple[str, str, int]]:
-    """Return past runs as (run_id, created_at, file_count), oldest first."""
+def list_runs(state_path: Path) -> list[tuple[str, int]]:
+    """Return past runs as (run_id, file_count), oldest first.
+
+    Sorted by `created_at` (not by `run_id`) so entries remain in true
+    chronological order even if the run_id format ever changes.
+    """
     state = load_state(state_path)
-    entries = [
-        (run_id, data["created_at"], len(data["files"]))
-        for run_id, data in state["runs"].items()
-    ]
-    entries.sort(key=lambda e: e[1])
-    return entries
+    items = sorted(state["runs"].items(), key=lambda kv: kv[1]["created_at"])
+    return [(run_id, len(data["files"])) for run_id, data in items]
 
 
 def regenerate_run(
@@ -446,8 +446,8 @@ def main(
             return 0
 
         if args.list_runs:
-            for run_id, created_at, n in list_runs(state_path):
-                print(f"{run_id}  {created_at}  {n} memos")
+            for run_id, n in list_runs(state_path):
+                print(f"{run_id}  {n} memos")
             return 0
 
         if args.regenerate:
@@ -461,7 +461,6 @@ def main(
 
         result = process_new_memos(memo_dir, state_path, output_dir)
         if result is None:
-            logger.info("No new memos to process.")
             return 0
         print(result)
         return 0

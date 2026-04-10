@@ -471,8 +471,8 @@ def test_list_runs_sorted_oldest_first(tmp_path):
 
     entries = list_runs(state_path)
     assert entries == [
-        ("2026-04-08_09-00-00", "2026-04-08T09:00:00Z", 1),
-        ("2026-04-09_17-30-00", "2026-04-09T17:30:00Z", 2),
+        ("2026-04-08_09-00-00", 1),
+        ("2026-04-09_17-30-00", 2),
     ]
 
 
