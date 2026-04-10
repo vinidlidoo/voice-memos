@@ -178,6 +178,10 @@ Each flag is mutually exclusive with the others. Default (no flags) is the commo
 - **M1 — pyproject.toml layout, not `uv init`:** Wrote `pyproject.toml` by hand rather than running `uv init`, because `uv init` assumes a package layout and we have a single-script `src/transcribe.py` that doesn't need to be packaged. Configured `[tool.pytest.ini_options] pythonpath = ["src"]` so tests can `import transcribe` without a package.
 - **M1 — Placeholder test kept in `tests/test_transcribe.py`:** `pytest` exits with code 5 when no tests are collected, which fails our `pytest && ruff` check chain. A trivial `test_module_imports` keeps the scaffold green and will be replaced by real tests in M2.
 - **M1 — `.gitignore` for `.md`:** Top-level `*.md` is ignored (generated transcription outputs land in cwd), with explicit allow-list exceptions for `plans/*.md`, `CLAUDE.md`, `README.md`.
+- **M2 — `MemoMeta` + `Memo` as frozen dataclasses.** `MemoMeta` holds parsed filename metadata (date, hhmm, timestamp, lat, lng); `Memo` is the rendering unit (filename + transcription + optional meta). Frozen → hashable and cheap to copy, reads cleanly in tests.
+- **M2 — `render_markdown` is pure, no clock.** Derives the H1 date from the first parseable memo. If no memos are parseable, the H1 is just `# Voice Memos` (no date) — keeps the function free of `datetime.now()` and therefore trivially testable. All-unparseable runs are an edge case that shouldn't dictate the signature.
+- **M2 — Non-parseable memos sort last.** Sort key is `(0, timestamp)` for parseable memos and `(1, filename)` for non-parseable ones, so fallback memos cluster at the end in filename order. Plan didn't specify; picking a deterministic order now avoids surprises later.
+- **M2 — `load_state` tolerates partial state shape.** `setdefault`s `version`, `files`, `runs` after loading so older/hand-edited state files still work. The corrupt path backs up with `shutil.copy2` (preserves mtime) using a local-time `YYYYMMDD-HHMMSS` suffix and raises `RuntimeError` — caller decides how to surface it.
 
 ## Test Plan
 
@@ -332,7 +336,7 @@ Source lives under `src/` from the start — v1 is a single file, but the projec
 Track progress through these checkpoints. Each milestone should leave the repo in a runnable, committable state.
 
 - [x] **M1 — Project scaffold.** `git init`, `uv init`, `pyproject.toml` with `groq` dep, `pytest` + `ruff` dev deps, and `pythonpath = ["src"]` for pytest. `.gitignore` covers `src/state.json`, `__pycache__`, `.venv`, generated `.md` outputs. Empty `src/transcribe.py` and `tests/test_transcribe.py`. `uv run pytest` runs (zero tests). `uv run ruff check` passes.
-- [ ] **M2 — Pure functions + unit tests.** Implement `parse_filename`, `should_sleep`, `render_markdown`, `load_state`, `write_state_atomic` with their unit tests. No Groq calls yet. All tests green.
+- [x] **M2 — Pure functions + unit tests.** Implement `parse_filename`, `should_sleep`, `render_markdown`, `load_state`, `write_state_atomic` with their unit tests. No Groq calls yet. All tests green.
 - [ ] **M3 — Transcription + retry.** Groq client wrapper with exponential backoff retry helper. Unit-test the retry helper with a fake callable (two failures → success).
 - [ ] **M4 — Main loop (default path).** Wire filename discovery → filter against state → transcribe → per-file atomic state write → markdown render → stdout path print. Unit tests for filtering, runs-entry creation, empty-run behavior.
 - [ ] **M5 — Other CLI modes.** `--all`, `--list-runs`, `--regenerate RUN_ID` with their unit tests (including `--all` overwrite semantics and regenerate-with-missing-file warning).
