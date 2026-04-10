@@ -9,6 +9,7 @@ from transcribe import (
     Memo,
     list_runs,
     load_state,
+    main,
     parse_filename,
     process_new_memos,
     refresh_all_transcriptions,
@@ -533,3 +534,59 @@ def test_regenerate_run_skips_missing_filenames_with_warning(tmp_path, caplog):
     assert "A text" in md
     assert file_b not in md
     assert any("no transcription" in r.message for r in caplog.records)
+
+
+# ---------- main() / error handling ----------
+
+
+def test_main_corrupt_state_exits_nonzero_and_backs_up(tmp_path, caplog):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    state_path.write_text("{ not valid json")
+
+    with caplog.at_level("ERROR", logger="voice_memos"):
+        rc = main(
+            argv=["--list-runs"],
+            memo_dir=memo_dir,
+            state_path=state_path,
+            output_dir=out_dir,
+        )
+    assert rc == 2
+    backups = list(state_path.parent.glob("state.json.corrupt-*"))
+    assert len(backups) == 1
+    assert any("corrupt" in r.message for r in caplog.records)
+
+
+def test_main_list_runs_empty_state_is_ok(tmp_path, capsys):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    rc = main(
+        argv=["--list-runs"],
+        memo_dir=memo_dir,
+        state_path=state_path,
+        output_dir=out_dir,
+    )
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_main_regenerate_unknown_run_id_exits_1(tmp_path, caplog):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    with caplog.at_level("ERROR", logger="voice_memos"):
+        rc = main(
+            argv=["--regenerate", "nope"],
+            memo_dir=memo_dir,
+            state_path=state_path,
+            output_dir=out_dir,
+        )
+    assert rc == 1
+    assert any("Unknown run ID" in r.message for r in caplog.records)
+
+
+def test_main_silences_groq_logger():
+    """M6 decision: noisy third-party libs are capped at WARNING."""
+    import logging as _logging
+
+    from transcribe import _configure_logging
+
+    _configure_logging()
+    for name in ("groq", "httpx", "httpcore"):
+        assert _logging.getLogger(name).level == _logging.WARNING

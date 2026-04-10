@@ -415,43 +415,61 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _configure_logging() -> None:
+    """Set up stderr logging and silence noisy third-party libraries."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s: %(message)s",
         stream=sys.stderr,
     )
+    # Groq SDK + its HTTP stack are chatty at INFO.
+    for noisy in ("groq", "httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    memo_dir: Path = DEFAULT_MEMO_DIR,
+    state_path: Path = DEFAULT_STATE_PATH,
+    output_dir: Path | None = None,
+) -> int:
+    _configure_logging()
     args = _build_parser().parse_args(argv)
-    memo_dir = DEFAULT_MEMO_DIR
-    state_path = DEFAULT_STATE_PATH
-    output_dir = Path.cwd()
+    if output_dir is None:
+        output_dir = Path.cwd()
 
-    if args.all:
-        n = refresh_all_transcriptions(memo_dir, state_path)
-        logger.info("Refreshed %d transcriptions", n)
-        return 0
+    try:
+        if args.all:
+            n = refresh_all_transcriptions(memo_dir, state_path)
+            logger.info("Refreshed %d transcriptions", n)
+            return 0
 
-    if args.list_runs:
-        for run_id, created_at, n in list_runs(state_path):
-            print(f"{run_id}  {created_at}  {n} memos")
-        return 0
+        if args.list_runs:
+            for run_id, created_at, n in list_runs(state_path):
+                print(f"{run_id}  {created_at}  {n} memos")
+            return 0
 
-    if args.regenerate:
-        try:
-            path = regenerate_run(args.regenerate, state_path, output_dir)
-        except KeyError as exc:
-            logger.error("%s", exc)
-            return 1
-        print(path)
-        return 0
+        if args.regenerate:
+            try:
+                path = regenerate_run(args.regenerate, state_path, output_dir)
+            except KeyError as exc:
+                logger.error("%s", exc)
+                return 1
+            print(path)
+            return 0
 
-    result = process_new_memos(memo_dir, state_path, output_dir)
-    if result is None:
-        logger.info("No new memos to process.")
+        result = process_new_memos(memo_dir, state_path, output_dir)
+        if result is None:
+            logger.info("No new memos to process.")
+            return 0
+        print(result)
         return 0
-    print(result)
-    return 0
+    except RuntimeError as exc:
+        # Covers corrupt state.json (load_state raises) and regenerate_run's
+        # "no memos available" case. The backup, if any, was already written.
+        logger.error("%s", exc)
+        return 2
 
 
 if __name__ == "__main__":
