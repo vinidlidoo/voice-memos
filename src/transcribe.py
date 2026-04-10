@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -274,3 +276,183 @@ def process_new_memos(
     write_state_atomic(state_path, state)
 
     return output_path
+
+
+def refresh_all_transcriptions(
+    memo_dir: Path,
+    state_path: Path,
+    *,
+    transcriber: Callable[[Path], str] = transcribe_file,
+    clock: Callable[[], datetime] = _default_clock,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Re-transcribe every file in state['files'], overwriting in place.
+
+    Returns the count of successfully refreshed transcriptions. Files that are
+    referenced in state but missing from `memo_dir` are skipped with a warning.
+    Entries are overwritten one at a time (not wiped up front), so a crash
+    mid-run preserves all completed work.
+    """
+    state = load_state(state_path)
+    filenames = sorted(state["files"].keys())
+    if not filenames:
+        logger.info("No files to refresh.")
+        return 0
+
+    rate_limited = should_sleep(len(filenames))
+    refreshed = 0
+
+    for i, name in enumerate(filenames):
+        audio_path = memo_dir / name
+        if not audio_path.exists():
+            logger.warning("Skipping %s: file missing from %s", name, memo_dir)
+            continue
+
+        logger.info("Refreshing %s", name)
+        try:
+            text = retry_with_backoff(
+                lambda p=audio_path: transcriber(p),
+                sleep=sleep,
+            )
+        except Exception as exc:
+            logger.error("Skipping %s: %s", name, exc)
+            continue
+
+        state["files"][name] = {
+            "transcription": text,
+            "transcribed_at": _format_iso_utc(clock()),
+        }
+        write_state_atomic(state_path, state)
+        refreshed += 1
+
+        if rate_limited and i < len(filenames) - 1:
+            sleep(SLEEP_BETWEEN_REQUESTS_SEC)
+
+    return refreshed
+
+
+def list_runs(state_path: Path) -> list[tuple[str, str, int]]:
+    """Return past runs as (run_id, created_at, file_count), oldest first."""
+    state = load_state(state_path)
+    entries = [
+        (run_id, data["created_at"], len(data["files"]))
+        for run_id, data in state["runs"].items()
+    ]
+    entries.sort(key=lambda e: e[1])
+    return entries
+
+
+def regenerate_run(
+    run_id: str,
+    state_path: Path,
+    output_dir: Path,
+) -> Path:
+    """Re-render markdown for a past run using current transcriptions.
+
+    Raises KeyError if run_id is unknown. Files referenced by the run but no
+    longer present in state['files'] are skipped with a warning.
+    """
+    state = load_state(state_path)
+    if run_id not in state["runs"]:
+        raise KeyError(f"Unknown run ID: {run_id}")
+
+    memos: list[Memo] = []
+    for name in state["runs"][run_id]["files"]:
+        entry = state["files"].get(name)
+        if entry is None:
+            logger.warning(
+                "Skipping %s: no transcription in state['files']", name
+            )
+            continue
+        memos.append(
+            Memo(
+                filename=name,
+                transcription=entry["transcription"],
+                meta=parse_filename(name),
+            )
+        )
+
+    if not memos:
+        raise RuntimeError(
+            f"No memos available for run {run_id}; nothing to render."
+        )
+
+    output_path = (output_dir / f"{run_id}.md").resolve()
+    output_path.write_text(render_markdown(memos))
+    return output_path
+
+
+# ---------- CLI entry point ----------
+
+
+DEFAULT_MEMO_DIR = (
+    Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/VoiceMemos"
+)
+DEFAULT_STATE_PATH = Path(__file__).resolve().parent / "state.json"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="transcribe",
+        description="Transcribe iCloud voice memos into a markdown file.",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Refresh every existing transcription in place (no markdown written).",
+    )
+    group.add_argument(
+        "--list-runs",
+        action="store_true",
+        help="Print past runs and exit.",
+    )
+    group.add_argument(
+        "--regenerate",
+        metavar="RUN_ID",
+        help="Re-render the markdown for a past run using current transcriptions.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    args = _build_parser().parse_args(argv)
+    memo_dir = DEFAULT_MEMO_DIR
+    state_path = DEFAULT_STATE_PATH
+    output_dir = Path.cwd()
+
+    if args.all:
+        n = refresh_all_transcriptions(memo_dir, state_path)
+        logger.info("Refreshed %d transcriptions", n)
+        return 0
+
+    if args.list_runs:
+        for run_id, created_at, n in list_runs(state_path):
+            print(f"{run_id}  {created_at}  {n} memos")
+        return 0
+
+    if args.regenerate:
+        try:
+            path = regenerate_run(args.regenerate, state_path, output_dir)
+        except KeyError as exc:
+            logger.error("%s", exc)
+            return 1
+        print(path)
+        return 0
+
+    result = process_new_memos(memo_dir, state_path, output_dir)
+    if result is None:
+        logger.info("No new memos to process.")
+        return 0
+    print(result)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

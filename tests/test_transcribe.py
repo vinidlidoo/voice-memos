@@ -7,9 +7,12 @@ from transcribe import (
     MAX_FILE_SIZE_BYTES,
     MAX_REQUESTS_PER_MINUTE,
     Memo,
+    list_runs,
     load_state,
     parse_filename,
     process_new_memos,
+    refresh_all_transcriptions,
+    regenerate_run,
     render_markdown,
     retry_with_backoff,
     should_sleep,
@@ -377,3 +380,156 @@ def test_process_all_failures_writes_no_output(tmp_path):
     assert result is None
     assert list(out_dir.glob("*.md")) == []
     assert load_state(state_path)["runs"] == {}
+
+
+# ---------- refresh_all_transcriptions (--all) ----------
+
+
+def test_refresh_all_overwrites_in_place_and_preserves_missing(tmp_path):
+    """Plan §`--all`: overwrite entries in place; entries whose audio file is
+    missing from memo_dir are left untouched so a partial crash can't wipe them.
+    """
+    memo_dir, state_path, _ = _make_env(tmp_path)
+    file_a = "memo_2026-04-09 17.45.00_47.7_-122.3.m4a"
+    file_b = "memo_2026-04-09 17.46.00_47.7_-122.3.m4a"
+
+    (memo_dir / file_a).write_bytes(b"a")
+
+    state = load_state(state_path)
+    state["files"][file_a] = {
+        "transcription": "old A",
+        "transcribed_at": "2026-04-09T17:30:00Z",
+    }
+    state["files"][file_b] = {
+        "transcription": "old B",
+        "transcribed_at": "2026-04-09T17:31:00Z",
+    }
+    write_state_atomic(state_path, state)
+
+    def fake_transcriber(p):
+        return f"new {p.name}"
+
+    n = refresh_all_transcriptions(
+        memo_dir,
+        state_path,
+        transcriber=fake_transcriber,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+    assert n == 1
+
+    state = load_state(state_path)
+    assert state["files"][file_a]["transcription"] == f"new {file_a}"
+    assert state["files"][file_b]["transcription"] == "old B"
+
+
+def test_refresh_all_does_not_touch_runs_or_write_markdown(tmp_path):
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+    file_a = "memo_2026-04-09 17.45.00_47.7_-122.3.m4a"
+    (memo_dir / file_a).write_bytes(b"a")
+
+    state = load_state(state_path)
+    state["files"][file_a] = {
+        "transcription": "old",
+        "transcribed_at": "2026-04-09T17:30:00Z",
+    }
+    state["runs"]["2026-04-09_17-30-00"] = {
+        "created_at": "2026-04-09T17:30:00Z",
+        "files": [file_a],
+    }
+    write_state_atomic(state_path, state)
+
+    refresh_all_transcriptions(
+        memo_dir,
+        state_path,
+        transcriber=lambda _p: "new",
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+
+    state = load_state(state_path)
+    assert list(state["runs"].keys()) == ["2026-04-09_17-30-00"]
+    assert list(out_dir.glob("*.md")) == []
+
+
+# ---------- list_runs ----------
+
+
+def test_list_runs_sorted_oldest_first(tmp_path):
+    _, state_path, _ = _make_env(tmp_path)
+    state = load_state(state_path)
+    state["runs"]["2026-04-09_17-30-00"] = {
+        "created_at": "2026-04-09T17:30:00Z",
+        "files": ["a.m4a", "b.m4a"],
+    }
+    state["runs"]["2026-04-08_09-00-00"] = {
+        "created_at": "2026-04-08T09:00:00Z",
+        "files": ["c.m4a"],
+    }
+    write_state_atomic(state_path, state)
+
+    entries = list_runs(state_path)
+    assert entries == [
+        ("2026-04-08_09-00-00", "2026-04-08T09:00:00Z", 1),
+        ("2026-04-09_17-30-00", "2026-04-09T17:30:00Z", 2),
+    ]
+
+
+def test_list_runs_empty_state(tmp_path):
+    _, state_path, _ = _make_env(tmp_path)
+    assert list_runs(state_path) == []
+
+
+# ---------- regenerate_run ----------
+
+
+def test_regenerate_run_uses_current_transcriptions(tmp_path):
+    """Regeneration pulls fresh text from state['files'], not the original."""
+    _, state_path, out_dir = _make_env(tmp_path)
+    file_a = "memo_2026-04-09 17.45.00_47.7_-122.3.m4a"
+
+    state = load_state(state_path)
+    state["files"][file_a] = {
+        "transcription": "REFRESHED TEXT",
+        "transcribed_at": "2026-04-09T17:30:00Z",
+    }
+    state["runs"]["2026-04-09_17-30-00"] = {
+        "created_at": "2026-04-09T17:30:00Z",
+        "files": [file_a],
+    }
+    write_state_atomic(state_path, state)
+
+    path = regenerate_run("2026-04-09_17-30-00", state_path, out_dir)
+    assert path.name == "2026-04-09_17-30-00.md"
+    assert "REFRESHED TEXT" in path.read_text()
+
+
+def test_regenerate_run_unknown_id_raises(tmp_path):
+    _, state_path, out_dir = _make_env(tmp_path)
+    with pytest.raises(KeyError, match="Unknown run ID"):
+        regenerate_run("does-not-exist", state_path, out_dir)
+
+
+def test_regenerate_run_skips_missing_filenames_with_warning(tmp_path, caplog):
+    _, state_path, out_dir = _make_env(tmp_path)
+    file_a = "memo_2026-04-09 17.45.00_47.7_-122.3.m4a"
+    file_b = "memo_2026-04-09 17.46.00_47.7_-122.3.m4a"
+
+    state = load_state(state_path)
+    state["files"][file_a] = {
+        "transcription": "A text",
+        "transcribed_at": "2026-04-09T17:30:00Z",
+    }
+    state["runs"]["2026-04-09_17-30-00"] = {
+        "created_at": "2026-04-09T17:30:00Z",
+        "files": [file_a, file_b],
+    }
+    write_state_atomic(state_path, state)
+
+    with caplog.at_level("WARNING", logger="voice_memos"):
+        path = regenerate_run("2026-04-09_17-30-00", state_path, out_dir)
+
+    md = path.read_text()
+    assert "A text" in md
+    assert file_b not in md
+    assert any("no transcription" in r.message for r in caplog.records)
