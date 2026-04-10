@@ -4,12 +4,15 @@ from datetime import datetime
 import pytest
 
 from transcribe import (
+    MAX_FILE_SIZE_BYTES,
     MAX_REQUESTS_PER_MINUTE,
     Memo,
     load_state,
     parse_filename,
     render_markdown,
+    retry_with_backoff,
     should_sleep,
+    transcribe_file,
     write_state_atomic,
 )
 
@@ -152,3 +155,72 @@ def test_write_state_atomic_per_file_persistence(tmp_path):
     write_state_atomic(path, state)
     reread = load_state(path)
     assert set(reread["files"].keys()) == {"a.m4a", "b.m4a"}
+
+
+# ---------- retry_with_backoff ----------
+
+
+def test_retry_succeeds_after_two_failures():
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("transient")
+        return "ok"
+
+    result = retry_with_backoff(flaky, sleep=sleeps.append)
+    assert result == "ok"
+    assert calls["n"] == 3
+    # Two sleeps between three attempts: base*1 and base*2.
+    assert sleeps == [1.0, 2.0]
+
+
+def test_retry_reraises_after_max_attempts():
+    calls = {"n": 0}
+
+    def always_fails():
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        retry_with_backoff(always_fails, sleep=lambda _: None)
+    assert calls["n"] == 3
+
+
+# ---------- transcribe_file ----------
+
+
+def test_transcribe_file_rejects_oversized(tmp_path):
+    path = tmp_path / "huge.m4a"
+    path.write_bytes(b"\x00" * (MAX_FILE_SIZE_BYTES + 1))
+    with pytest.raises(ValueError, match="exceeds Groq"):
+        transcribe_file(path)
+
+
+def test_transcribe_file_calls_client_with_model(tmp_path):
+    path = tmp_path / "memo.m4a"
+    path.write_bytes(b"fake-audio-bytes")
+
+    captured = {}
+
+    class FakeResp:
+        text = "hello world"
+
+    class FakeTranscriptions:
+        def create(self, *, file, model):
+            captured["file"] = file
+            captured["model"] = model
+            return FakeResp()
+
+    class FakeAudio:
+        transcriptions = FakeTranscriptions()
+
+    class FakeClient:
+        audio = FakeAudio()
+
+    result = transcribe_file(path, client=FakeClient())
+    assert result == "hello world"
+    assert captured["model"] == "whisper-large-v3-turbo"
+    assert captured["file"] == ("memo.m4a", b"fake-audio-bytes")

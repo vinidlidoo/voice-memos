@@ -4,6 +4,8 @@ import json
 import os
 import re
 import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +13,14 @@ from pathlib import Path
 # Rate limiting — tuned to Groq free tier. See plan §Transcription.
 MAX_REQUESTS_PER_MINUTE = 20
 SLEEP_BETWEEN_REQUESTS_SEC = 3.5
+
+# Groq transcription settings.
+GROQ_MODEL = "whisper-large-v3-turbo"
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
+
+# Retry policy for Groq API calls.
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY_SEC = 1.0
 
 STATE_VERSION = 1
 
@@ -108,3 +118,51 @@ def write_state_atomic(path: Path, state: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
     os.replace(tmp, path)
+
+
+def retry_with_backoff[T](
+    func: Callable[[], T],
+    *,
+    max_attempts: int = RETRY_MAX_ATTEMPTS,
+    base_delay: float = RETRY_BASE_DELAY_SEC,
+    sleep: Callable[[float], None] = time.sleep,
+) -> T:
+    """Call `func()` with exponential backoff (base, base*2, base*4, ...).
+
+    Retries up to `max_attempts - 1` times on any Exception, then re-raises.
+    `sleep` is injectable so tests don't have to wait.
+    """
+    for attempt in range(max_attempts):
+        try:
+            return func()
+        except Exception:
+            if attempt == max_attempts - 1:
+                raise
+            sleep(base_delay * (2**attempt))
+    # Unreachable: the loop above either returns or raises.
+    raise RuntimeError("retry_with_backoff exhausted without returning or raising")
+
+
+def _default_groq_client():
+    from groq import Groq
+
+    return Groq()
+
+
+def transcribe_file(path: Path, *, client=None) -> str:
+    """Transcribe a single audio file via Groq. Raises ValueError if too large."""
+    size = path.stat().st_size
+    if size > MAX_FILE_SIZE_BYTES:
+        raise ValueError(
+            f"{path.name} is {size} bytes, exceeds Groq's "
+            f"{MAX_FILE_SIZE_BYTES} byte limit. "
+            "Chunk with ffmpeg before retrying."
+        )
+    if client is None:
+        client = _default_groq_client()
+    with path.open("rb") as f:
+        resp = client.audio.transcriptions.create(
+            file=(path.name, f.read()),
+            model=GROQ_MODEL,
+        )
+    return resp.text
