@@ -69,20 +69,20 @@ def should_sleep(n_files: int) -> bool:
     return n_files > MAX_REQUESTS_PER_MINUTE
 
 
-def _memo_sort_key(memo: Memo) -> tuple:
-    if memo.meta is not None:
-        return (0, memo.meta.timestamp)
-    return (1, memo.filename)
-
-
 def render_markdown(memos: list[Memo]) -> str:
+    """Render a list of memos to a markdown string.
+
+    Input order is preserved — the caller is responsible for sorting.
+    Sorting happens at the filesystem boundary (see `_file_sort_key`)
+    because non-parseable filenames need file mtime, which is a
+    filesystem concern that doesn't belong inside a pure renderer.
+    """
     if not memos:
         raise ValueError("render_markdown requires at least one memo")
-    ordered = sorted(memos, key=_memo_sort_key)
-    header_date = next((m.meta.date for m in ordered if m.meta is not None), None)
+    header_date = next((m.meta.date for m in memos if m.meta is not None), None)
     header = f"# Voice Memos — {header_date}" if header_date else "# Voice Memos"
     lines = [header, ""]
-    for i, memo in enumerate(ordered, start=1):
+    for i, memo in enumerate(memos, start=1):
         if memo.meta is not None:
             lat = round(memo.meta.lat, 3)
             lng = round(memo.meta.lng, 3)
@@ -170,7 +170,10 @@ def transcribe_file(path: Path, *, client=None) -> str:
             file=(path.name, f.read()),
             model=GROQ_MODEL,
         )
-    return resp.text
+    # Whisper's BPE tokenizer prepends a space to most tokens; the decoded
+    # output almost always has a leading space. Strip at the boundary so
+    # stored transcriptions are clean.
+    return resp.text.strip()
 
 
 def discover_audio_files(memo_dir: Path) -> list[Path]:
@@ -186,10 +189,17 @@ def discover_audio_files(memo_dir: Path) -> list[Path]:
 
 
 def _file_sort_key(path: Path) -> tuple:
+    """Sort parseable memos by filename timestamp, non-parseable by file mtime.
+
+    Parseable memos cluster first (tier 0), non-parseable cluster after
+    (tier 1). Within tier 1, mtime ordering matches recording order for
+    ad-hoc filenames where lexicographic sort would be wrong
+    (e.g., "Carkeek Park 10.m4a" would sort before "Carkeek Park 4.m4a").
+    """
     meta = parse_filename(path.name)
     if meta is not None:
         return (0, meta.timestamp)
-    return (1, path.name)
+    return (1, path.stat().st_mtime)
 
 
 def _format_run_id(dt_local: datetime) -> str:

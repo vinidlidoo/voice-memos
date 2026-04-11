@@ -71,10 +71,13 @@ def _memo(filename: str, transcription: str) -> Memo:
     )
 
 
-def test_render_markdown_sorts_chronologically():
+def test_render_markdown_preserves_input_order():
+    """render_markdown trusts caller order — sorting happens at the
+    filesystem boundary (process_new_memos / _file_sort_key).
+    """
     memos = [
-        _memo("memo_2026-04-09 17.46.00_47.714644_-122.373724.m4a", "Second memo."),
         _memo("memo_2026-04-09 17.45.00_47.714644_-122.373724.m4a", "First memo."),
+        _memo("memo_2026-04-09 17.46.00_47.714644_-122.373724.m4a", "Second memo."),
     ]
     md = render_markdown(memos)
     assert md.startswith("# Voice Memos — 2026-04-09\n")
@@ -231,6 +234,29 @@ def test_transcribe_file_calls_client_with_model(tmp_path):
     assert captured["file"] == ("memo.m4a", b"fake-audio-bytes")
 
 
+def test_transcribe_file_strips_leading_whitespace(tmp_path):
+    """Whisper prepends a space to most decoded tokens; strip at the
+    boundary so stored transcriptions are clean.
+    """
+    path = tmp_path / "memo.m4a"
+    path.write_bytes(b"fake")
+
+    class FakeResp:
+        text = " hello world "  # leading + trailing whitespace
+
+    class FakeTranscriptions:
+        def create(self, *, file, model):
+            return FakeResp()
+
+    class FakeAudio:
+        transcriptions = FakeTranscriptions()
+
+    class FakeClient:
+        audio = FakeAudio()
+
+    assert transcribe_file(path, client=FakeClient()) == "hello world"
+
+
 # ---------- process_new_memos (main loop) ----------
 
 
@@ -361,6 +387,57 @@ def test_process_ignores_qta_files(tmp_path):
     )
     assert len(calls) == 1
     assert calls[0].endswith(".m4a")
+
+
+def test_process_orders_non_parseable_files_by_mtime(tmp_path):
+    """Regression: non-parseable filenames must sort by file mtime,
+    not lexicographically. Caught by a batch of converted .qta files
+    where 'Carkeek Park 10.m4a' was rendering before 'Carkeek Park 4.m4a'
+    because of string comparison.
+    """
+    import os
+
+    memo_dir, state_path, out_dir = _make_env(tmp_path)
+
+    # Three non-parseable files whose lexicographic order is the
+    # reverse of their mtime order.
+    f_lex_last = memo_dir / "zebra.m4a"  # lex last  / mtime oldest
+    f_lex_mid = memo_dir / "middle.m4a"
+    f_lex_first = memo_dir / "apple.m4a"  # lex first / mtime newest
+
+    for p in (f_lex_last, f_lex_mid, f_lex_first):
+        p.write_bytes(b"x")
+
+    os.utime(f_lex_last, (1000, 1000))
+    os.utime(f_lex_mid, (2000, 2000))
+    os.utime(f_lex_first, (3000, 3000))
+
+    def fake_transcriber(p):
+        return f"text for {p.name}"
+
+    result = process_new_memos(
+        memo_dir,
+        state_path,
+        out_dir,
+        transcriber=fake_transcriber,
+        clock=_fixed_clock(),
+        sleep=lambda _: None,
+    )
+    assert result is not None
+
+    md = result.read_text()
+    idx_zebra = md.index("zebra.m4a")
+    idx_middle = md.index("middle.m4a")
+    idx_apple = md.index("apple.m4a")
+    assert idx_zebra < idx_middle < idx_apple, "expected mtime order, not lex order"
+
+    state = load_state(state_path)
+    run_id = "2026-04-09_17-50-00"
+    assert state["runs"][run_id]["files"] == [
+        "zebra.m4a",
+        "middle.m4a",
+        "apple.m4a",
+    ]
 
 
 def test_process_all_failures_writes_no_output(tmp_path):
