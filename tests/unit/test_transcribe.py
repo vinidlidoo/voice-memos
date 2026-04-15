@@ -71,6 +71,9 @@ def _memo(filename: str, transcription: str) -> Memo:
     )
 
 
+RUN_DT = datetime(2026, 4, 15, 13, 40, 3)
+
+
 def test_render_markdown_preserves_input_order():
     """render_markdown trusts caller order — sorting happens at the
     filesystem boundary (process_new_memos / _file_sort_key).
@@ -79,29 +82,77 @@ def test_render_markdown_preserves_input_order():
         _memo("memo_2026-04-09 17.45.00_47.714644_-122.373724.m4a", "First memo."),
         _memo("memo_2026-04-09 17.46.00_47.714644_-122.373724.m4a", "Second memo."),
     ]
-    md = render_markdown(memos)
-    assert md.startswith("# Voice Memos — 2026-04-09\n")
+    md = render_markdown(memos, RUN_DT)
+    assert md.startswith("# Voice Memos — 2026-04-15 13:40\n")
+    assert "## 2026-04-09" in md
     assert md.index("First memo.") < md.index("Second memo.")
-    assert "## Memo 1 — 17:45 — 47.715, -122.374" in md
-    assert "## Memo 2 — 17:46 — 47.715, -122.374" in md
+    assert "### Memo 1 — 17:45 — 47.715, -122.374" in md
+    assert "### Memo 2 — 17:46 — 47.715, -122.374" in md
 
 
 def test_render_markdown_fallback_heading():
+    """All-non-parseable: no date H2, memo entries follow the H1 directly."""
     memo = Memo(filename="weird_recording.m4a", transcription="Hello.", meta=None)
-    md = render_markdown([memo])
-    assert "## Memo 1 — weird_recording.m4a" in md
-    assert md.startswith("# Voice Memos\n")
+    md = render_markdown([memo], RUN_DT)
+    assert md.startswith("# Voice Memos — 2026-04-15 13:40\n")
+    assert "### Memo 1 — weird_recording.m4a" in md
+    # No H2 sections — no date header and no `## Unknown date` fallback.
+    h2_lines = [ln for ln in md.splitlines() if ln.startswith("## ")]
+    assert h2_lines == []
 
 
 def test_render_markdown_empty_raises():
     with pytest.raises(ValueError):
-        render_markdown([])
+        render_markdown([], RUN_DT)
 
 
 def test_render_markdown_coord_rounding():
     memo = _memo("memo_2026-04-09 17.45.00_47.7149999_-122.3738.m4a", "x")
-    md = render_markdown([memo])
+    md = render_markdown([memo], RUN_DT)
     assert "47.715, -122.374" in md
+
+
+def test_render_markdown_multi_day_grouping():
+    """Memos across multiple dates get one H2 per date; memo numbering is
+    continuous across sections."""
+    memos = [
+        _memo("memo_2026-04-08 10.15.00_47.7_-122.3.m4a", "Day 1 memo."),
+        _memo("memo_2026-04-09 17.45.00_47.7_-122.3.m4a", "Day 2 first."),
+        _memo("memo_2026-04-09 17.46.00_47.7_-122.3.m4a", "Day 2 second."),
+        _memo("memo_2026-04-10 09.00.00_47.7_-122.3.m4a", "Day 3 memo."),
+    ]
+    md = render_markdown(memos, RUN_DT)
+    assert "## 2026-04-08" in md
+    assert "## 2026-04-09" in md
+    assert "## 2026-04-10" in md
+    # Continuous numbering across date groups.
+    assert "### Memo 1 — 10:15" in md
+    assert "### Memo 2 — 17:45" in md
+    assert "### Memo 3 — 17:46" in md
+    assert "### Memo 4 — 09:00" in md
+    # Date headers appear in the right order.
+    assert md.index("## 2026-04-08") < md.index("## 2026-04-09") < md.index("## 2026-04-10")
+    # Each memo lives under its date header.
+    assert md.index("## 2026-04-08") < md.index("Day 1 memo.") < md.index("## 2026-04-09")
+    assert md.index("## 2026-04-09") < md.index("Day 2 first.") < md.index("## 2026-04-10")
+    assert md.index("## 2026-04-10") < md.index("Day 3 memo.")
+
+
+def test_render_markdown_mixed_parseable_and_fallback():
+    """Parseable memos under their date H2; non-parseable under trailing
+    `## Unknown date`. Numbering is continuous."""
+    memos = [
+        _memo("memo_2026-04-09 17.45.00_47.7_-122.3.m4a", "Parseable."),
+        Memo(filename="weird.m4a", transcription="Fallback.", meta=None),
+    ]
+    md = render_markdown(memos, RUN_DT)
+    assert "## 2026-04-09" in md
+    assert "## Unknown date" in md
+    assert md.index("## 2026-04-09") < md.index("## Unknown date")
+    assert "### Memo 1 — 17:45" in md
+    assert "### Memo 2 — weird.m4a" in md
+    # Parseable content precedes the Unknown-date header.
+    assert md.index("Parseable.") < md.index("## Unknown date") < md.index("Fallback.")
 
 
 # ---------- state management ----------

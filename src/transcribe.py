@@ -69,29 +69,51 @@ def should_sleep(n_files: int) -> bool:
     return n_files > MAX_REQUESTS_PER_MINUTE
 
 
-def render_markdown(memos: list[Memo]) -> str:
+def render_markdown(memos: list[Memo], run_datetime: datetime) -> str:
     """Render a list of memos to a markdown string.
 
     Input order is preserved — the caller is responsible for sorting.
     Sorting happens at the filesystem boundary (see `_file_sort_key`)
     because non-parseable filenames need file mtime, which is a
     filesystem concern that doesn't belong inside a pure renderer.
+
+    Layout: H1 is the run timestamp (local, minute precision). Parseable
+    memos cluster under per-date H2 sections. Non-parseable memos cluster
+    under a trailing `## Unknown date` section — unless *every* memo is
+    non-parseable, in which case there's no date to group by and memo
+    entries follow the H1 directly. Memo numbering is continuous across
+    sections (1..N for the whole run).
     """
     if not memos:
         raise ValueError("render_markdown requires at least one memo")
-    header_date = next((m.meta.date for m in memos if m.meta is not None), None)
-    header = f"# Voice Memos — {header_date}" if header_date else "# Voice Memos"
-    lines = [header, ""]
-    for i, memo in enumerate(memos, start=1):
-        if memo.meta is not None:
-            lat = round(memo.meta.lat, 3)
-            lng = round(memo.meta.lng, 3)
-            heading = f"## Memo {i} — {memo.meta.hhmm} — {lat}, {lng}"
-        else:
-            heading = f"## Memo {i} — {memo.filename}"
-        lines.append(heading)
-        lines.append(memo.transcription)
+    lines = [f"# Voice Memos — {run_datetime.strftime('%Y-%m-%d %H:%M')}"]
+
+    numbered = list(enumerate(memos, start=1))
+    parseable = [(i, m) for i, m in numbered if m.meta is not None]
+    non_parseable = [(i, m) for i, m in numbered if m.meta is None]
+
+    current_date: str | None = None
+    for i, memo in parseable:
+        assert memo.meta is not None  # narrow for the type checker
+        if memo.meta.date != current_date:
+            current_date = memo.meta.date
+            lines.append("")
+            lines.append(f"## {current_date}")
+        lat = round(memo.meta.lat, 3)
+        lng = round(memo.meta.lng, 3)
         lines.append("")
+        lines.append(f"### Memo {i} — {memo.meta.hhmm} — {lat}, {lng}")
+        lines.append(memo.transcription)
+
+    if non_parseable:
+        if parseable:
+            lines.append("")
+            lines.append("## Unknown date")
+        for i, memo in non_parseable:
+            lines.append("")
+            lines.append(f"### Memo {i} — {memo.filename}")
+            lines.append(memo.transcription)
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -277,7 +299,7 @@ def process_new_memos(
     run_local = clock()
     run_id = _format_run_id(run_local)
     output_path = (output_dir / f"vm-{run_id}.md").resolve()
-    output_path.write_text(render_markdown(memos))
+    output_path.write_text(render_markdown(memos, run_local))
 
     state["runs"][run_id] = {
         "created_at": _format_iso_utc(run_local),
@@ -400,8 +422,10 @@ def regenerate_run(
             f"No memos available for run {run_id}; nothing to render."
         )
 
+    # run_id is local-time "YYYY-MM-DD_HH-MM-SS"; parse back for the H1.
+    run_datetime = datetime.strptime(run_id, "%Y-%m-%d_%H-%M-%S")
     output_path = (output_dir / f"vm-{run_id}.md").resolve()
-    output_path.write_text(render_markdown(memos))
+    output_path.write_text(render_markdown(memos, run_datetime))
     return output_path
 
 

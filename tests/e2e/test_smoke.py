@@ -32,6 +32,9 @@ HERE = Path(__file__).resolve().parent
 FIXTURE_DIR = HERE / "fixtures" / "smoke"
 
 PARSEABLE_FIXTURES = [
+    # 04-08 fixture is a copy of the 17.47.41 audio with a different filename —
+    # exercises multi-date grouping without adding meaningful transcription cost.
+    "memo_2026-04-08 10.15.00_47.71464468712184_-122.373724393098.m4a",
     "memo_2026-04-09 17.47.13_47.71463839736928_-122.373747134786.m4a",
     "memo_2026-04-09 17.47.41_47.71464468712184_-122.373724393098.m4a",
 ]
@@ -93,21 +96,39 @@ def test_smoke(tmp_path):
     assert md_files[0].name.startswith("vm-"), f"expected vm- prefix: {md_files[0].name}"
     md_text = md_files[0].read_text()
 
-    assert md_text.startswith("# Voice Memos — 2026-04-09"), (
-        f"unexpected H1: {md_text.splitlines()[0]!r}"
+    import re
+
+    first_line = md_text.splitlines()[0]
+    assert re.match(r"^# Voice Memos — \d{4}-\d{2}-\d{2} \d{2}:\d{2}$", first_line), (
+        f"unexpected H1: {first_line!r}"
     )
 
-    for n in (1, 2, 3, 4):
-        assert f"## Memo {n} —" in md_text, f"expected `## Memo {n} —` heading"
-
-    assert "## Memo 1 — 17:47" in md_text, "expected Memo 1 to use the structured HH:MM heading"
-    assert "## Memo 2 — 17:47" in md_text, "expected Memo 2 to use the structured HH:MM heading"
-
-    assert "## Memo 3 — Carkeek Park 11.m4a" in md_text, (
-        "expected Carkeek Park 11 at Memo 3 (earliest mtime in tier 1)"
+    # Date H2 sections: 04-08 and 04-09 for parseable memos, trailing
+    # `## Unknown date` for the two Carkeek fixtures.
+    assert "## 2026-04-08" in md_text
+    assert "## 2026-04-09" in md_text
+    assert "## Unknown date" in md_text
+    assert (
+        md_text.index("## 2026-04-08")
+        < md_text.index("## 2026-04-09")
+        < md_text.index("## Unknown date")
     )
-    assert "## Memo 4 — Carkeek Park 10.m4a" in md_text, (
-        "expected Carkeek Park 10 at Memo 4 (latest mtime in tier 1)"
+
+    # Continuous memo numbering across sections:
+    # 1 = 04-08 10:15, 2 = 04-09 17:47:13, 3 = 04-09 17:47:41,
+    # 4 = Carkeek Park 11 (earlier mtime), 5 = Carkeek Park 10.
+    for n in (1, 2, 3, 4, 5):
+        assert f"### Memo {n} —" in md_text, f"expected `### Memo {n} —` heading"
+
+    assert "### Memo 1 — 10:15" in md_text, "expected Memo 1 to be the 04-08 10:15 fixture"
+    assert "### Memo 2 — 17:47" in md_text
+    assert "### Memo 3 — 17:47" in md_text
+
+    assert "### Memo 4 — Carkeek Park 11.m4a" in md_text, (
+        "expected Carkeek Park 11 at Memo 4 (earliest mtime in tier 1)"
+    )
+    assert "### Memo 5 — Carkeek Park 10.m4a" in md_text, (
+        "expected Carkeek Park 10 at Memo 5 (latest mtime in tier 1)"
     )
 
     # Whitespace-strip invariant: no line should start with a space.
