@@ -11,6 +11,6 @@ transcriptions/*
 
 # Generated output
 *.md
-!plans/*.md
+!plans/**/*.md
 !CLAUDE.md
 !README.md
