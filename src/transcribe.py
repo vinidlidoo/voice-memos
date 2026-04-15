@@ -276,7 +276,7 @@ def process_new_memos(
 
     run_local = clock()
     run_id = _format_run_id(run_local)
-    output_path = (output_dir / f"{run_id}.md").resolve()
+    output_path = (output_dir / f"vm-{run_id}.md").resolve()
     output_path.write_text(render_markdown(memos))
 
     state["runs"][run_id] = {
@@ -400,7 +400,7 @@ def regenerate_run(
             f"No memos available for run {run_id}; nothing to render."
         )
 
-    output_path = (output_dir / f"{run_id}.md").resolve()
+    output_path = (output_dir / f"vm-{run_id}.md").resolve()
     output_path.write_text(render_markdown(memos))
     return output_path
 
@@ -412,6 +412,7 @@ DEFAULT_MEMO_DIR = (
     Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/VoiceMemos"
 )
 DEFAULT_STATE_PATH = Path(__file__).resolve().parent / "state.json"
+DEFAULT_OUTPUT_DIR = Path.home() / "Obsidian Vault" / "Voice"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -434,6 +435,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--regenerate",
         metavar="RUN_ID",
         help="Re-render the markdown for a past run using current transcriptions.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to write the run markdown into. "
+            "Defaults to the Obsidian vault's Voice/ folder."
+        ),
     )
     return parser
 
@@ -460,7 +471,8 @@ def main(
     _configure_logging()
     args = _build_parser().parse_args(argv)
     if output_dir is None:
-        output_dir = Path.cwd()
+        output_dir = args.output_dir if args.output_dir is not None else DEFAULT_OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         if args.all:

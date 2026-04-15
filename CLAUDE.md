@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- **Run the CLI**: `uv run src/transcribe.py [--all | --list-runs | --regenerate RUN_ID]`
+- **Run the CLI**: `uv run src/transcribe.py [--all | --list-runs | --regenerate RUN_ID] [-o OUTPUT_DIR]`
 - **Unit tests**: `uv run pytest`
 - **Single test**: `uv run pytest tests/unit/test_transcribe.py::test_name`
 - **Lint**: `uv run ruff check`

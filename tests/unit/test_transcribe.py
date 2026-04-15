@@ -314,7 +314,7 @@ def test_process_writes_markdown_state_and_run_entry(tmp_path):
     )
 
     assert result is not None
-    assert result.name == "2026-04-09_17-50-00.md"
+    assert result.name == "vm-2026-04-09_17-50-00.md"
     md = result.read_text()
     assert f"text for {f1}" in md
     assert f"text for {f2}" in md
@@ -636,7 +636,7 @@ def test_regenerate_run_uses_current_transcriptions(tmp_path):
     write_state_atomic(state_path, state)
 
     path = regenerate_run("2026-04-09_17-30-00", state_path, out_dir)
-    assert path.name == "2026-04-09_17-30-00.md"
+    assert path.name == "vm-2026-04-09_17-30-00.md"
     assert "REFRESHED TEXT" in path.read_text()
 
 
@@ -714,6 +714,44 @@ def test_main_regenerate_unknown_run_id_exits_1(tmp_path, caplog):
         )
     assert rc == 1
     assert any("Unknown run ID" in r.message for r in caplog.records)
+
+
+def test_main_default_output_dir_uses_obsidian_vault(tmp_path, monkeypatch):
+    """With no -o flag and no output_dir kwarg, main() resolves to and
+    creates DEFAULT_OUTPUT_DIR (pointed at a tmp path so the real vault
+    isn't touched)."""
+    import transcribe as tm
+
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "state.json"
+    default_out = tmp_path / "fake-vault" / "Voice"  # doesn't exist yet
+
+    monkeypatch.setattr(tm, "DEFAULT_OUTPUT_DIR", default_out)
+
+    rc = tm.main(argv=["--list-runs"], memo_dir=memo_dir, state_path=state_path)
+    assert rc == 0
+    assert default_out.exists()
+
+
+def test_main_output_dir_flag_overrides_default(tmp_path, monkeypatch):
+    import transcribe as tm
+
+    memo_dir = tmp_path / "memos"
+    memo_dir.mkdir()
+    state_path = tmp_path / "state.json"
+    default_out = tmp_path / "should-not-be-used"
+    flag_out = tmp_path / "flag-target"
+
+    monkeypatch.setattr(tm, "DEFAULT_OUTPUT_DIR", default_out)
+
+    tm.main(
+        argv=["--list-runs", "-o", str(flag_out)],
+        memo_dir=memo_dir,
+        state_path=state_path,
+    )
+    assert flag_out.exists()
+    assert not default_out.exists()
 
 
 def test_main_silences_groq_logger():
