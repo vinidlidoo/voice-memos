@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Unit tests**: `uv run pytest`
 - **Single test**: `uv run pytest tests/unit/test_transcribe.py::test_name`
 - **Lint**: `uv run ruff check`
-- **Real-API smoke test** (gated on `GROQ_API_KEY`): `uv run tests/e2e/smoke.py`
+- **Real-API smoke test** (gated on `GROQ_API_KEY`, costs money): `uv run pytest -m e2e`
 
 ## Architecture
 
